@@ -1,0 +1,142 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: nexus-postgres
+    environment:
+      POSTGRES_DB: nexus_crm_db
+      POSTGRES_USER: nexus_user
+      POSTGRES_PASSWORD: nexus_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - nexus-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB
+  mongodb:
+    image: mongo:7-jammy
+    container_name: nexus-mongodb
+    environment:
+      MONGO_INITDB_DATABASE: nexus_crm
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - nexus-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: nexus-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - nexus-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus-backend
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://nexus_user:nexus_password@postgres:5432/nexus_crm_db
+      REDIS_HOST: redis
+      MONGODB_URI: mongodb://mongodb:27017/nexus_crm
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    networks:
+      - nexus-network
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    command: npm run start
+
+  # AI Services
+  ai-services:
+    build:
+      context: ./ai-services
+      dockerfile: Dockerfile
+    container_name: nexus-ai
+    environment:
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "8000:8000"
+    networks:
+      - nexus-network
+    volumes:
+      - ./ai-services:/app
+      - ai_models:/app/models
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nexus-frontend
+    environment:
+      REACT_APP_API_URL: http://backend:5000
+      REACT_APP_AI_URL: http://ai-services:8000
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - nexus-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: nexus-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - nexus-network
+
+networks:
+  nexus-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+  ai_models:
